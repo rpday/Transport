@@ -34,7 +34,8 @@ class HP3478A:
         
     def _disconnect(self):
         
-        print('disconnect')
+        self.instrument.before_close()
+        self.instrument.close()
         
     def _do_acv_measure(self):
         '''
@@ -64,35 +65,47 @@ class LS331:
         
     def _disconnect(self):
         
-        print('disconnecting from LS331')
+        self.instrument.before_close()
+        self.instrument.close()
         
         
     def _measure_T(self):
-        
-        return float(self.instrument.query('KRDG? {:s}'.format(self.channel)))
+        Tnow = self.instrument.query('KRDG? {:s}'.format(self.channel))
+        return float(Tnow)
 
 
 class SR850:
     
-    def __init__(self,GPIB_address):
+    def __init__(self,GPIB_address,freq=27.2,Vin=1.0):
         
-        self.address = GPIB_address
-        
+        self.address = 'GPIB::{:d}::INSTR'.format(GPIB_address)
+        self.instrument = self._connect()
+        self._instrument_setup(freq,Vin)
         
     def _connect(self):
         
-        print('connecting to SR850')
+        return rm.open_resource(self.address)
+    
+    def _instrument_setup(self,freq,Vin):
+        self.instrument.write('FMOD 0',termination='<lf>')
+        self.instrument.write('FREQ {:0.03f}'.format(freq),termination='<lf>')
+        self.instrument.write('SLVL {:0.03f}'.format(Vin),termination='<lf>')
+        self.instrument.write('STRT',termination='<lf>')
+        
+        
         
         
     def _disconnect(self):
         
-        print('disconnecting from SR850')
+        self.instrument.before_close()
+        self.instrument.close()
     
     
     def _measure_V(self):
         
-        print('measuring')
-        return 0
+        x = float(self.instrument.query('OUTP? 1'))
+        y = float(self.instrument.query('OUTP? 2'))
+        return x,y
     
     
     
