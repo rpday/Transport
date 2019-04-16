@@ -10,6 +10,8 @@ import numpy as np
 
 import tkinter as Tk
 from tkinter import filedialog
+from matplotlib.backends.backend_tkagg import FigureCanvasTkAgg
+
 from threading import Thread
 from queue import Queue
 import time
@@ -52,6 +54,11 @@ class interface:
         self.rate = 1.0
         self.integrate = 10.0
         
+        self.Tsample = []
+        self.Rsample = []
+        self.Rref = []
+        self.time_record = []
+        
         self.temp_tol = 0.5
         self.stable_tol = 2.0
         self.dwell_time = 0.0
@@ -60,141 +67,13 @@ class interface:
         self.cycle = 'Idle'
         self.window_make()
         
-        
-    def measure_temp(self):
-        '''
-        Garbage function, generates fake temperature data, for use in designing the GUI ONLY
-        '''
-        
-        Tnow = 250+5*np.exp(-(self.time_stamp-self.time_start)/5) + 0.05*np.random.random()
-        time.sleep(0.2)
-        return Tnow
-        
-        
-    
-    
-    def time_update(self):
-        '''
-        Time-keeper updates the program time once a second, on its own thread,
-        allowing the interface to remain accessible to the user, while the
-        counter is being incremented. This timestamp can be referenced by any
-        of our other worker-threads, such as the temperature logger, to dictate 
-        when a new job should be submitted to the queue. This is set, by default,
-        to update every 100 ms.
-        '''
-        while self.run_timer:
-            tnow = time.time()
-            self.time_stamp = tnow
-            self.timestring.set(time.ctime(self.time_stamp))
-
-            time.sleep(1)
-            
-            if self.stop_timer:
-                break
-            
-    def temp_update(self):
-        '''
-        Main worker function for the temperature thread--besides the ongoing
-        time loop, this function determines the state of progress, using the 
-        logic network of *cycle_update* below. While the daemon is in principle
-        running this function continuously, it only really executes when the 
-        program is in its 'running' mode, i.e. the start button has been pressed.
-        '''
-        
-        while self.run_temp:
-
-            if self.running:
-                self.tempnow = self.measure_temp()
-                self.cycle_update()
-                self.tempnow_str.set('Temperature: {:0.03f}'.format(self.tempnow))
-
-            if self.stop_temp:
-                break
-            
-    def res_update(self):
-        '''
-        Main worker function for the resistance measurement-thread. As with temp_update,
-        this is constantly running, but only actually executes the measurement when we 
-        are in acquistion mode, set by *cycle_update*
-        '''
-        
-        while self.run_res:
-            
-            if self.running and self.acquiring:
-                self.resnow = self.measure_R()
-                self.measurement.append(self.resnow)
-                print('Resistance: ',self.resnow)
-            
-            if self.stop_res:
-                break
-            
-    def measure_R(self):
-        '''
-        Dummy function right now, should be replaced by a proper call to the lock-in amplifier
-        Simulates a dataread with a time sleep, and the just returns 1 with a 10% random error.
-        '''
-        
-        
-        time.sleep(1)
-        return np.random.random()*0.5+5.0
-        
-            
-    def cycle_update(self):
-        '''
-        This function defines a series of logic gates which determine the current state
-        of the program. If temperature is changing, we print out to screen the current 
-        cooling/heating state, if it is reasonably stable, we are either in the dwell
-        or acquisition state. Once the dwell has been successfuly completed, without 
-        ever leaving the safe range, then we initiate acquisition.
-        
-        '''
-        
-            
-        if self.running:
-            if abs(self.tempnow-self.setnow)>self.temp_tol:
-                
-                self.dwell = False #if at any point the temperature becomes unstable again, the dwell will have to be restarted, and acquisition restarted
-                self.acquiring = False
-                
-                if self.tempnow>self.setnow:
-                    self.cycle = 'Cooling'
-                    
-                elif self.tempnow<self.setnow:
-                    self.cycle = 'Heating'
-
-            else:
-                if not self.dwell:
-                    self.dwell_start = self.time_stamp
-                    self.dwell = True
-                else:
-                    self.dwell_time = self.time_stamp - self.dwell_start
-                    
-                if self.dwell_time<self.stable_tol:
-                    self.cycle = 'Stabilizing'
-                else:
-                    if not self.acquiring:
-                        self.acquire_start = self.time_stamp
-                        self.acquiring = True
-                        self.measurement = []
-                    self.measure_time = self.time_stamp-self.acquire_start
-                    
-                    if self.measure_time<self.integrate:
-                        self.cycle = 'Acquiring'
-                    else:
-                        if len(self.measurement)>0:
-                            self.R_now = sum(self.measurement)/len(self.measurement) 
-                            print(len(self.measurement))
-                            self.acquiring = False
-                            self.dwell = False
-                            print('change setpoint')
-                        self.cycle = 'Continue'
-        else:
-            self.cycle = 'Idle'
-            
-        self.cycle_str.set('Cycle: {:s}'.format(self.cycle))
                                     
                         
-        
+###############################################################################
+########################                    ###################################
+########################    THREAD SETUP    ###################################
+########################                    ###################################
+###############################################################################        
         
     def initialize_timekeeper(self):
         '''
@@ -235,32 +114,70 @@ class interface:
         self.R_thread.start()
         
         
-    def _quit(self):
+    def time_update(self):
         '''
-        Quit the UI. To safely exit, the timekeeper and all other worker threads must
-        safely be terminated, before then finally terminating the UI itself.
+        Time-keeper updates the program time once a second, on its own thread,
+        allowing the interface to remain accessible to the user, while the
+        counter is being incremented. This timestamp can be referenced by any
+        of our other worker-threads, such as the temperature logger, to dictate 
+        when a new job should be submitted to the queue. This is set, by default,
+        to update every 100 ms.
         '''
-        if self.run_timer:
-            self.stop_timer = True
-            self.timethread.join()
-        if self.run_temp:
-            self.stop_temp = True
-            self.T_thread.join()
-        if self.run_res:
-            self.stop_res = True
-            self.R_thread.join()
-        with self.queue.mutex:
-            self.queue.queue.clear()
-        self.root.quit()
-        self.root.destroy()
+        while self.run_timer:
+            tnow = time.time()
+            self.time_stamp = tnow
+            self.timestring.set(time.ctime(self.time_stamp))
+            if self.running:
+                if np.mod(self.time_stamp-self.time_start,5)<1:
+                    self.update_plot()
+            time.sleep(1)
+            
+            if self.stop_timer:
+                break
+            
+    def temp_update(self):
+        '''
+        Main worker function for the temperature thread--besides the ongoing
+        time loop, this function determines the state of progress, using the 
+        logic network of *cycle_update* below. While the daemon is in principle
+        running this function continuously, it only really executes when the 
+        program is in its 'running' mode, i.e. the start button has been pressed.
+        '''
+        
+        while self.run_temp:
 
+            if self.running:
+                self.tempnow = self.measure_temp()
+                self.cycle_update()
+                self.tempnow_str.set('Temperature: {:0.03f}'.format(self.tempnow))
+
+            if self.stop_temp:
+                break
+            
+    def res_update(self):
+        '''
+        Main worker function for the resistance measurement-thread. As with temp_update,
+        this is constantly running, but only actually executes the measurement when we 
+        are in acquistion mode, set by *cycle_update*
+        '''
         
+        while self.run_res:
+            
+            if self.running and self.acquiring:
+                self.resnow = self.measure_R()
+                self.Tmeasurement.append(self.tempnow)
+                self.Rmeasurement.append(self.resnow)
+                print('Resistance: ',self.resnow)
+            
+            if self.stop_res:
+                break
         
-    def browsefile(self):
-        self.fnm =  filedialog.asksaveasfilename(initialdir = "/",title = "Select file",filetypes = (("text files","*.txt"),("all files","*.*")))
+###############################################################################
+##########################                     ################################
+########################## ACQUISITION PROGRAM ################################
+##########################                     ################################
+###############################################################################   
         
-        if self.fnm[-4:]!='.txt':
-            self.fnm = self.fnm+'.txt'
             
     def update_program(self):
         try:
@@ -281,32 +198,6 @@ class interface:
         self.setnow_str.set('Setpoint: {:0.03f} K'.format(self.setnow))
         self.tempnow_str.set('Temperature: {:0.03f} K'.format(self.tempnow))
             
-            
-    def make_program_frame(self):
-        '''
-        Create all requisite widgets for defining the execution program
-        '''
-        
-        self.set_var = Tk.StringVar()
-        self.set_var.set('{:0.03f}'.format(self.setnow))
-        self.rate_var = Tk.StringVar()
-        self.rate_var.set('{:0.03f}'.format(self.rate))
-        self.int_var = Tk.StringVar()
-        self.int_var.set('{:0.03f}'.format(self.integrate))
-        self.program_frame = Tk.LabelFrame(master=self.root,text='Program',width=300)
-        self.program_frame.grid(padx=10,row=6,column=0,sticky='W',pady=5,ipadx=5)
-        self.setpoint_label = Tk.Label(master=self.program_frame,text='Setpoint: (K)').grid(row=7,column=0,sticky='W',pady=5)
-        self.setpoint_set = Tk.Entry(master=self.program_frame,textvariable=self.set_var)
-        self.setpoint_set.grid(row=7,column=2,columnspan=3,sticky='W',pady=5,ipadx=5)
-        self.rate_label = Tk.Label(master=self.program_frame,text='Temperature Rate: (K/min)').grid(row=8,column=0,sticky='W',pady=5)
-        self.rate_set = Tk.Entry(master=self.program_frame,textvariable=self.rate_var)
-        self.rate_set.grid(row=8,column=2,columnspan=3,sticky='W',pady=5,ipadx=5)
-        self.integrate_label = Tk.Label(master=self.program_frame,text='Date Integration: (s)').grid(row=9,column=0,sticky='W',pady=5)
-        self.integrate_set = Tk.Entry(master=self.program_frame,textvariable=self.int_var)
-        self.integrate_set.grid(row=9,column=2,columnspan=3,sticky='W',pady=5,ipadx=5)
-        self.savelabel = Tk.Label(master=self.program_frame,text='Save: ').grid(row=10,column=0,sticky='W',pady=5)
-        self.browse = Tk.Button(master=self.program_frame,text='Browse',command=self.browsefile)
-        self.browse.grid(row=10,column=2,columnspan=3,sticky='W',ipadx=42,pady=5)
     
     def start_timers(self):
         '''
@@ -347,6 +238,139 @@ class interface:
             self.integrate_set.config(state = 'normal')
             self.browse.config(state = 'normal')
             
+            
+###############################################################################
+############################              #####################################
+############################ MEASUREMENTS #####################################
+############################              #####################################
+###############################################################################
+            
+            
+            
+    def measure_temp(self):
+        '''
+        Garbage function, generates fake temperature data, for use in designing the GUI ONLY
+        '''
+        
+        Tnow = 250+5*np.exp(-(self.time_stamp-self.time_start)/5) + 0.05*np.random.random()
+        time.sleep(0.2)
+        return Tnow
+        
+            
+    def measure_R(self):
+        '''
+        Dummy function right now, should be replaced by a proper call to the lock-in amplifier
+        Simulates a dataread with a time sleep, and the just returns 1 with a 10% random error.
+        '''
+        
+        
+        time.sleep(1)
+        return np.random.random()*0.5+5.0
+        
+            
+    def cycle_update(self):
+        '''
+        This function defines a series of logic gates which determine the current state
+        of the program. If temperature is changing, we print out to screen the current 
+        cooling/heating state, if it is reasonably stable, we are either in the dwell
+        or acquisition state. Once the dwell has been successfuly completed, without 
+        ever leaving the safe range, then we initiate acquisition.
+        
+        '''
+        
+            
+        if self.running:
+            if abs(self.tempnow-self.setnow)>self.temp_tol:
+                
+                self.dwell = False 
+                self.acquiring = False
+                
+                if self.tempnow>self.setnow:
+                    self.cycle = 'Cooling'
+                    
+                elif self.tempnow<self.setnow:
+                    self.cycle = 'Heating'
+
+            else:
+                if not self.dwell:
+                    self.dwell_start = self.time_stamp
+                    self.dwell = True
+                else:
+                    self.dwell_time = self.time_stamp - self.dwell_start
+                    
+                if self.dwell_time<self.stable_tol:
+                    self.cycle = 'Stabilizing'
+                else:
+                    if not self.acquiring:
+                        self.acquire_start = self.time_stamp
+                        self.acquiring = True
+                        self.Tmeasurement = []
+                        self.Rmeasurement = []
+                    self.measure_time = self.time_stamp-self.acquire_start
+                    
+                    if self.measure_time<self.integrate:
+                        self.cycle = 'Acquiring'
+                    else:
+                        self.tidy_measurement()
+                        print('change setpoint')
+                        self.cycle = 'Continue'
+        else:
+            self.cycle = 'Idle'
+            
+        self.cycle_str.set('Cycle: {:s}'.format(self.cycle))
+        
+    def tidy_measurement(self):
+        if len(self.Rmeasurement)>0:
+
+            self.T_meas = sum(self.Tmeasurement)/len(self.Tmeasurement)
+            self.R_meas = sum(self.Rmeasurement)/len(self.Rmeasurement) 
+            self.Tsample.append(self.T_meas)
+            self.Rsample.append(self.R_meas)
+            
+            self.time_record.append(self.time_stamp)
+#            self.update_plot()
+        self.acquiring = False
+        self.dwell = False
+        
+    def update_plot(self):
+        self.ax.cla()
+        self.line, = self.ax.plot(self.time_record,self.Rsample)
+        self.fig.canvas.draw()
+        
+###############################################################################
+############################              #####################################
+############################ WINDOW SETUP #####################################
+############################              #####################################
+###############################################################################       
+        
+            
+                
+    def make_program_frame(self):
+        '''
+        Create all requisite widgets for defining the execution program
+        '''
+        
+        self.set_var = Tk.StringVar()
+        self.set_var.set('{:0.03f}'.format(self.setnow))
+        self.rate_var = Tk.StringVar()
+        self.rate_var.set('{:0.03f}'.format(self.rate))
+        self.int_var = Tk.StringVar()
+        self.int_var.set('{:0.03f}'.format(self.integrate))
+        self.program_frame = Tk.LabelFrame(master=self.root,text='Program',width=300)
+        self.program_frame.grid(padx=10,row=6,column=0,sticky='W',pady=5,ipadx=5)
+        self.setpoint_label = Tk.Label(master=self.program_frame,text='Setpoint: (K)').grid(row=7,column=0,sticky='W',pady=5)
+        self.setpoint_set = Tk.Entry(master=self.program_frame,textvariable=self.set_var)
+        self.setpoint_set.grid(row=7,column=2,columnspan=3,sticky='W',pady=5,ipadx=5)
+        self.rate_label = Tk.Label(master=self.program_frame,text='Temperature Rate: (K/min)').grid(row=8,column=0,sticky='W',pady=5)
+        self.rate_set = Tk.Entry(master=self.program_frame,textvariable=self.rate_var)
+        self.rate_set.grid(row=8,column=2,columnspan=3,sticky='W',pady=5,ipadx=5)
+        self.integrate_label = Tk.Label(master=self.program_frame,text='Date Integration: (s)').grid(row=9,column=0,sticky='W',pady=5)
+        self.integrate_set = Tk.Entry(master=self.program_frame,textvariable=self.int_var)
+        self.integrate_set.grid(row=9,column=2,columnspan=3,sticky='W',pady=5,ipadx=5)
+        self.savelabel = Tk.Label(master=self.program_frame,text='Save: ').grid(row=10,column=0,sticky='W',pady=5)
+        self.browse = Tk.Button(master=self.program_frame,text='Browse',command=self.browsefile)
+        self.browse.grid(row=10,column=2,columnspan=3,sticky='W',ipadx=42,pady=5)
+            
     
     def make_execute_frame(self):
         '''
@@ -372,6 +396,38 @@ class interface:
         self.run_button = Tk.Button(master=self.running_frame,textvariable=self.run_str,command=self.cycle_run,width=35)
         self.run_button.grid(row=15,column=0,padx=13,pady=5,columnspan=3)
         
+    def browsefile(self):
+        self.fnm =  filedialog.asksaveasfilename(initialdir = "/",title = "Select file",filetypes = (("text files","*.txt"),("all files","*.*")))
+        
+        if self.fnm[-4:]!='.txt':
+            self.fnm = self.fnm+'.txt'
+        
+        
+    def _quit(self):
+        '''
+        Quit the UI. To safely exit, the timekeeper and all other worker threads must
+        safely be terminated, before then finally terminating the UI itself.
+        '''
+        if self.run_timer:
+            self.stop_timer = True
+            self.timethread.join()
+        if self.run_temp:
+            self.stop_temp = True
+            self.T_thread.join()
+        if self.run_res:
+            self.stop_res = True
+            self.R_thread.join()
+        with self.queue.mutex:
+            self.queue.queue.clear()
+        self.root.quit()
+        self.root.destroy()
+        
+    def fig_build(self):
+        self.fig = plt.Figure(figsize=(6,4))
+        self.ax = self.fig.add_subplot(111)
+        self.line, = self.ax.plot(self.time_record,self.Rsample)
+        self.window = FigureCanvasTkAgg(self.fig,master=self.root)
+        self.window.get_tk_widget().grid(row=0,column=0,columnspan=8,rowspan=6)
         
     def window_make(self):
         '''
@@ -381,7 +437,7 @@ class interface:
         '''
         
         self.root = Tk.Tk()
-        self.root.geometry('315x620')
+#        self.root.geometry('315x620')
         self.timestring = Tk.StringVar()
         self.timestring.set(time.ctime(time.time()))
         
@@ -390,14 +446,15 @@ class interface:
         self.initialize_thermometer()
         self.initialize_resistance()
         
-        self.dataplot = Tk.Canvas(master=self.root)
-        self.dataplot.create_rectangle(10, 10, 303, 290, outline="#fb0", fill="#fb0")
-        self.dataplot.grid(row=0,column=0,columnspan=6,rowspan=6,sticky='W')
- 
+    
+
+#        self.dataplot = Tk.Canvas(master=self.root)
+#        self.dataplot.create_rectangle(10, 10, 303, 290, outline="#fb0", fill="#fb0")
+#        self.dataplot.grid(row=0,column=0,columnspan=6,rowspan=6,sticky='W')
+        self.fig_build()
         self.make_program_frame()
                
         self.make_execute_frame()       
- 
         
         self.qbutton = Tk.Button(master=self.root,text='QUIT',command=self._quit)
         self.qbutton.grid(row=16,column=0,sticky='W',pady=5,padx=10)
